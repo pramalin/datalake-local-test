@@ -480,6 +480,57 @@ implementation.
 
 ---
 
+## 18. Revoked grants showed as active forever (the most serious finding yet)
+
+**Symptom:** caught by a second round of external review, not by the
+automated tests -- which is itself the finding, see issue #16's
+follow-up below. The acceptance query for "who has access as of date X"
+was answering incorrectly for the single most common case: a normal
+revocation. Carla's Feb 1 revocation produced a history row with
+`revoked_at` populated but `effective_end = NULL` and `is_current =
+true` -- so any "as of" query for a LATER date (e.g. March 1) still
+matched that row and incorrectly reported her as having active access.
+
+**Root cause:** the Type 2 merge treated a revocation as just another
+ordinary update -- close the old row, open a new "current" row. But the
+new row it opened represented the REVOKED state, which should never be
+"active." The merge conflated "a new version of this record exists" with
+"access is still granted," and those are not the same thing.
+
+**Fix:** implemented the access-period model, as suggested by the
+reviewer. A revocation (an update where `revoked_at` becomes non-null)
+now CLOSES the access-period row, exactly like a hard delete does --
+neither one opens a new "current" row. `fact_access_grant_history` now
+represents periods of actual access, not a raw version log. See the
+`closes_access` logic in `lakehouse-sql/03_bronze_to_gold.sql`.
+
+**Also fixed in the same pass:** the closed row for a hard delete now
+correctly sets `is_deleted = true` (it previously never did), and
+`lakehouse-sql/04_acceptance_queries.sql`'s comments were corrected to
+stop claiming an exact March 1 `effective_end` for the delete case --
+that was never achievable given hard deletes carry no business
+timestamp, and the acceptance query itself said one thing while the
+implementation did another.
+
+**Why the automated tests didn't catch this:** `scripts/02-verify.sh`'s
+idempotency check only asked "does re-running with no new events change
+row counts" -- a genuinely different question from "are the answers
+correct." A merge can be perfectly stable and stably wrong. This is why
+`scripts/03-assert-business-answers.sh` now exists: it asserts specific,
+correct answers (including a direct regression test for this exact bug --
+"Carla has NO active access as of March 1"), not just stability.
+
+**Honest limitation this does NOT fix:** the assertion suite
+deliberately does not check "the contractor has no access after March
+1" (the narrative delete date) -- the current implementation cannot
+guarantee that, since a hard delete's `effective_end` is Debezium's
+capture time (whenever the demo was actually run), not a business
+date. Asserting the narrative date would pass by coincidence today and
+fail on a later re-run. This is the same tradeoff documented in issue
+#17, now correctly reflected in the tests instead of silently ignored.
+
+---
+
 ## General lesson
 
 Most of the above weren't bugs in the SQL or the architecture — they were

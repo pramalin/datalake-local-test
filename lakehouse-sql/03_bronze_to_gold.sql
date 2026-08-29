@@ -7,6 +7,15 @@
 -- log -- it is safe to re-run at any time (idempotent via the watermark
 -- table below), and it is the actual answer to "where does history come
 -- from if the live pipeline upserts?" -- it doesn't upsert anymore.
+--
+-- ACCESS-PERIOD MODEL: fact_access_grant_history represents periods of
+-- ACTUAL ACCESS, not a raw version log of every row change. A
+-- revocation or a hard delete both END an access period -- neither one
+-- opens a new "current" row. (An earlier version of this script treated
+-- a revocation as just another update, which incorrectly left a
+-- "current, but revoked" row with no effective_end -- meaning a revoked
+-- grant would still show up as active in any future "as of" query. This
+-- was caught by external review; see TROUBLESHOOTING.md.)
 -- ============================================================
 
 -- One-time setup: watermark table, tracks how far the gold merge has
@@ -26,15 +35,28 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.gold_merge_watermark (
 -- what makes this safe even if bronze has multiple events per grant_id
 -- since the last run (e.g. two quick updates to the same grant).
 --
+-- KNOWN LIMITATION: this dedup keeps only the LATEST event per grant_id
+-- within a single run. That's fine for current-state, but if multiple
+-- history-relevant events land for the same grant between merge runs,
+-- the intermediate ones are discarded rather than each producing their
+-- own history interval. The demo scripts avoid this by merging after
+-- EVERY event (see scripts/01-replay-narrative.sh), but a production
+-- version should process every event in order for history, not just
+-- the latest per grant per run. See README.md "Known limitations."
+--
 -- business_ts: for creates/updates, the row's own updated_at is a real,
 -- app-set business timestamp. For a DELETE, there is no such thing --
 -- under REPLICA IDENTITY DEFAULT (the default here) a delete's "before"
 -- image only carries primary-key columns, so updated_at comes through
 -- NULL. Deletes fall back to Debezium's own capture time
 -- (__source_ts_ns) as the best available record of when the deletion
--- actually happened -- this is a deliberate, documented choice (see
+-- actually happened -- this is a deliberate, documented tradeoff (see
 -- README.md "Known limitations" -- hard deletes have no business-level
 -- "deleted at" timestamp at all), not an oversight.
+--
+-- closes_access: true for a hard delete, OR an update that sets
+-- revoked_at. Either one ENDS the access period -- neither should open
+-- a new "current" row in history.
 DROP TABLE IF EXISTS iceberg.iam.stg_bronze_batch;
 CREATE TABLE iceberg.iam.stg_bronze_batch AS
 SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
@@ -42,7 +64,8 @@ SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
        CASE
            WHEN __op = 'd' THEN from_unixtime(CAST(__source_ts_ns AS DOUBLE) / 1000000000)
            ELSE updated_at
-       END AS business_ts
+       END AS business_ts,
+       (__op = 'd' OR (__op = 'u' AND revoked_at IS NOT NULL)) AS closes_access
 FROM (
     SELECT *,
            ROW_NUMBER() OVER (PARTITION BY grant_id ORDER BY __source_ts_ns DESC) AS rn
@@ -55,7 +78,11 @@ FROM (
 ) t
 WHERE rn = 1;
 
--- Step 2: Type 1 merge -- current-state table
+-- Step 2: Type 1 merge -- current-state table (mirrors the source row
+-- as-is, including revoked_at when set; this is a raw current-state
+-- mirror, NOT pre-filtered to "active access only" -- callers who want
+-- "who currently has access" must filter revoked_at IS NULL AND
+-- is_deleted = false, same as the history table's access-period rows).
 MERGE INTO iceberg.iam.fact_access_grant AS target
 USING iceberg.iam.stg_bronze_batch AS source
 ON target.grant_id = source.grant_id
@@ -74,19 +101,30 @@ WHEN NOT MATCHED AND source.op != 'd' THEN
             source.granted_at, source.revoked_at, source.updated_at, source.is_deleted);
 
 -- Step 3: Type 2 -- close out the currently-active version for any
--- grant_id touched in this batch. Uses business_ts, NOT updated_at
--- directly, so deletes close out with a real timestamp instead of NULL.
+-- grant_id touched in this batch. Applies to ALL events in the batch
+-- (not just closing ones) -- an ordinary update still needs to close
+-- the prior version before step 4 potentially opens a new one.
+-- is_deleted on the CLOSED row is set true only when the closing event
+-- was a hard delete -- a revocation closes the access period but was
+-- not a hard delete, so is_deleted stays false for that case.
 UPDATE iceberg.iam.fact_access_grant_history
 SET effective_end = (
         SELECT business_ts FROM iceberg.iam.stg_bronze_batch b
         WHERE b.grant_id = fact_access_grant_history.grant_id
     ),
-    is_current = false
+    is_current = false,
+    is_deleted = (
+        SELECT op = 'd' FROM iceberg.iam.stg_bronze_batch b
+        WHERE b.grant_id = fact_access_grant_history.grant_id
+    )
 WHERE is_current = true
   AND grant_id IN (SELECT grant_id FROM iceberg.iam.stg_bronze_batch);
 
--- Step 4: Type 2 -- insert the new current version (deletes just close
--- the row above; no new "current" version for a deleted grant).
+-- Step 4: Type 2 -- insert a new current version ONLY for events that
+-- do NOT close access (a genuine create, or an update that isn't a
+-- revocation, e.g. a role/metadata change with revoked_at still NULL).
+-- Revocations and hard deletes are fully handled by step 3 closing the
+-- prior version -- no new "current" row for either.
 INSERT INTO iceberg.iam.fact_access_grant_history
 SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
        business_ts AS effective_start,
@@ -94,7 +132,7 @@ SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
        true AS is_current,
        is_deleted
 FROM iceberg.iam.stg_bronze_batch
-WHERE op != 'd';
+WHERE NOT closes_access;
 
 -- Step 5: advance the watermark to the latest event actually processed
 -- in this run. If stg_bronze_batch was empty (no new events), this

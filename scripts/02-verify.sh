@@ -42,3 +42,9 @@ echo "=== Duplicate current-version check (must be zero rows) ==="
 docker exec dl_trino trino --catalog iceberg --schema iam --execute \
   "SELECT grant_id, COUNT(*) AS current_version_count FROM fact_access_grant_history WHERE is_current GROUP BY grant_id HAVING COUNT(*) > 1"
 echo "(no output above this line means zero rows -- correct)"
+
+echo ""
+echo "=== Business-answer assertions ==="
+echo "(idempotency and the duplicate-check above prove the merge is STABLE --"
+echo " this proves the ANSWERS are actually CORRECT, which is a different thing)"
+"$SCRIPT_DIR/03-assert-business-answers.sh"

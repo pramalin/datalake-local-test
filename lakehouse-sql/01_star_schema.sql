@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.fact_access_grant (
     is_deleted   BOOLEAN
 ) WITH (
     format = 'PARQUET',
-    partitioning = ARRAY['day(updated_at)']   -- clustering-key equivalent for pruning
+    partitioning = ARRAY['day(updated_at)']   -- prunes scans by day; NOT a direct equivalent to Snowflake clustering keys -- mechanics and performance characteristics differ, validate separately in Snowflake
 );
 
 -- ============================================================

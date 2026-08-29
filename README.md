@@ -15,9 +15,13 @@ real infrastructure.
 | `debezium-server` | Captures Postgres WAL changes and appends them to an immutable bronze log — `ghcr.io/memiiso/debezium-server-iceberg` | The real CDC + landing layer proposed for the client |
 | `echo-receiver` | HTTP endpoint that logs incoming CDC events | Optional — kept from earlier debugging, not required for the current pipeline |
 
-Apache Iceberg is the closest open equivalent to how Snowflake actually
-manages tables under the hood, and Snowflake natively supports querying
-Iceberg tables — so schema/logic validated here should translate cleanly.
+Apache Iceberg is an open table format Snowflake natively supports
+querying, which is why it's used here as the local stand-in for
+Snowflake -- but this environment validates the **dimensional model,
+temporal-query semantics, and CDC concepts**, not Snowflake itself.
+Snowflake-specific behavior (exact SQL dialect, clustering keys,
+transactional guarantees, streams/tasks) requires separate validation
+directly in Snowflake -- see "Not covered here" below.
 
 ![Local data lake stack architecture](docs/images/architecture.svg)
 
@@ -255,6 +259,12 @@ ALTER TABLE iam_denormalized REPLICA IDENTITY FULL;
   versions? (Confirmed yes — re-running the merge with no new bronze
   events leaves gold table row counts unchanged, and the
   duplicate-current-version check returns zero rows.)
+- Are the actual business ANSWERS correct, not just stable? These are
+  different questions -- a merge can be perfectly idempotent and stably
+  wrong. `scripts/03-assert-business-answers.sh` asserts specific,
+  correct answers (including a direct regression test for the
+  revocation bug in TROUBLESHOOTING.md issue #18), not just row-count
+  stability. (Confirmed yes, as of the access-period model fix.)
 
 ## Known limitations (documented, not yet built)
 
@@ -278,11 +288,31 @@ this local proof of concept:
   **This is not just theoretical**: hard deletes concretely demonstrate
   the gap, since they carry no business timestamp at all and fall back
   to capture time (see section 5's REPLICA IDENTITY note) -- a real,
-  caught-by-testing instance of exactly this limitation.
-- **Delete semantics** — deletes currently close the access period
-  without inserting an explicit tombstone row; `is_deleted` in the
-  history table is populated but not the primary signal. Worth a single,
-  explicit decision (interval model vs. version model) before production.
+  caught-by-testing instance of exactly this limitation. The assertion
+  suite (`scripts/03-assert-business-answers.sh`) deliberately does not
+  assert an exact business date for the delete case, for this reason.
+- **Delete/revocation semantics -- resolved via the access-period model**:
+  a revocation or hard delete both CLOSE the access-period row (setting
+  `effective_end`) and neither opens a new "current" row -- an earlier
+  version got this wrong for revocations specifically (see
+  TROUBLESHOOTING.md issue #18). `is_deleted` on the closed row is now
+  the reliable signal for "this ended because of a hard delete" versus
+  "this ended because of a normal revocation."
+- **Batch dedup can discard intermediate history events** — the
+  bronze-to-gold merge keeps only the LATEST bronze event per `grant_id`
+  within a single run (needed for idempotency). If multiple
+  history-relevant events land for the same grant between merge runs,
+  the intermediate ones are silently dropped rather than each producing
+  their own history interval. The demo scripts avoid this by merging
+  after every single event (`scripts/01-replay-narrative.sh`), but a
+  production version should process every event in order for history --
+  current-state can safely use latest-per-grant, history cannot.
+- **Timestamp-based watermark is not a safe cursor at scale** — the
+  gold merge advances using `__source_ts_ns > last_processed_ts`, a
+  nanosecond capture timestamp. This can skip events if two changes
+  share a timestamp or arrive out of order. A production cursor should
+  use the Postgres LSN plus a transaction/sequence order, or at minimum
+  a composite event key, not a bare timestamp.
 - **Two-step gold merge isn't transactionally atomic** — if the insert
   step failed after the close-out step succeeded, a grant could be left
   with no current version. A production implementation on Snowflake
