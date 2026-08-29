@@ -247,6 +247,116 @@ first run.
 
 ---
 
+## 10. `ghcr.io/memiiso/debezium-server-iceberg:1.1.0.Final` fails to pull
+
+**Symptom:**
+```
+failed to copy: httpReadSeeker: failed open: content at
+https://ghcr.io/v2/memiiso/debezium-server-iceberg/manifests/sha256:...
+not found: not found
+```
+
+**Root cause:** a broken published image on GHCR — confirmed by a comment
+in the project's own release workflow describing a known issue where an
+image-cleanup step can delete layers a release tag still points to,
+leaving the tag present but unpullable.
+
+**Fix:** use the `latest` tag instead of a specific pinned version
+(`ghcr.io/memiiso/debezium-server-iceberg:latest`) — a separate push not
+affected by the same broken cleanup run.
+
+---
+
+## 11. `Unsupported format version: v3 (supported: v2)`
+
+**Symptom:**
+```
+Failed to create table from debezium event ... Error:Unsupported format version: v3 (supported: v2)
+```
+
+**Root cause:** `debezium-server-iceberg` defaults to writing Iceberg
+tables using table **format-version 3**. `tabulario/iceberg-rest` (the
+catalog image used up to this point) is stuck on Iceberg REST catalog spec
+version 1.6.0 (no updates in over a year) and only understands v2.
+
+**Fix — the real one:** swap the catalog image for the **official Apache
+Iceberg project's own reference image**, which is actively maintained and
+supports v3:
+```yaml
+iceberg-rest:
+  image: apache/iceberg-rest-fixture:1.10.1   # was tabulario/iceberg-rest:latest
+```
+(A same-day workaround of forcing `debezium.sink.iceberg.format-version=2`
+also works if you specifically need v2, but the catalog swap is the
+better fix since it removes the ceiling entirely.)
+
+**Important side effect:** swapping the catalog image resets its internal
+metadata store — existing namespaces/tables are no longer known to the new
+catalog, even though the underlying Parquet files remain in MinIO. Do a
+full reset (`docker compose down -v && docker compose up -d`) and rebuild
+the star schema fresh after this swap.
+
+---
+
+## 12. `Unable to load region from any of the providers in the chain`
+
+**Symptom:**
+```
+software.amazon.awssdk.core.exception.SdkClientException: Unable to load region
+from any of the providers in the chain ... Region must be specified either via
+environment variable (AWS_REGION) or system property (aws.region)
+```
+This happens specifically when actually **writing** a data file (after
+table creation already succeeded) — the AWS S3 client requires a region
+even when the endpoint is MinIO, which doesn't use regions at all.
+
+**Fix:** set the region in two places for reliability:
+```yaml
+# docker-compose.yml
+debezium-server:
+  environment:
+    - AWS_REGION=us-east-1
+```
+```properties
+# application.properties
+debezium.sink.iceberg.client.region=us-east-1
+```
+
+---
+
+## 13. Config file edits silently not taking effect
+
+**Recurring symptom throughout this session:** an error referencing a
+property that was definitely added to `application.properties` (e.g.
+`debezium.sink.iceberg.warehouse is required`), followed by `grep` on the
+file showing the property genuinely absent.
+
+**Root cause:** several `sed`/edit commands across the session updated a
+version of the file that wasn't the one actually mounted, or an edit
+described in chat was never actually run against the real file on disk.
+
+**Fix / habit that prevented repeat failures:** after any config change,
+always verify with a direct `grep` on the exact property before restarting
+containers — e.g. `grep "warehouse" debezium/conf/application.properties`
+— rather than assuming an edit landed. When in doubt, overwrite the whole
+file in one `cat > file << 'EOF' ... EOF` block rather than patching
+piecemeal, since that removes any ambiguity about what the file actually
+contains afterward.
+
+---
+
+## Final resolution
+
+The full pipeline — PostgreSQL (WAL, pgoutput) -> Debezium Server
+(`debezium-server-iceberg`, upsert mode) -> Apache Iceberg REST catalog
+(`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables -- is confirmed
+working end to end, including live upserts from real Postgres `UPDATE`
+statements landing correctly in the Iceberg table within seconds, with no
+manual staging or merge step required. See `README.md` section 5 for the
+final working configuration.
+
+---
+
 ## General lesson
 
 Most of the above weren't bugs in the SQL or the architecture — they were

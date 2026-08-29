@@ -1,4 +1,3 @@
-
 services:
   # ---- Source OLTP database (stand-in for the client's PostgreSQL) ----
   postgres:
@@ -13,7 +12,7 @@ services:
     volumes:
       - ./postgres-init:/docker-entrypoint-initdb.d
       - pg_data:/var/lib/postgresql/data
-    command: ["postgres", "-c", "wal_level=logical"]  # ready for Debezium later, unused for now
+    command: ["postgres", "-c", "wal_level=logical"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U iam_user -d iam_source"]
       interval: 5s
@@ -54,8 +53,12 @@ services:
       "
 
   # ---- Iceberg REST catalog: tracks table metadata (schema, snapshots, partitions) ----
+  # Using the official Apache Iceberg project's own reference image (actively
+  # maintained) rather than tabulario/iceberg-rest, which is stuck on an old
+  # Iceberg version that only supports table format-version 2. This image
+  # supports v3.
   iceberg-rest:
-    image: tabulario/iceberg-rest:latest
+    image: apache/iceberg-rest-fixture:1.10.1
     container_name: dl_iceberg_rest
     environment:
       CATALOG_WAREHOUSE: s3://datalake/warehouse
@@ -82,10 +85,14 @@ services:
     depends_on:
       - iceberg-rest
 
-  # ---- Debezium Server: captures Postgres WAL changes, ships them to S3 ----
+  # ---- Debezium Server: captures Postgres WAL changes, writes directly to
+  #      Iceberg tables (no S3-JSON intermediate step, no Kafka) ----
   debezium-server:
-    image: debezium/server:3.0.0.Final
+    image: ghcr.io/memiiso/debezium-server-iceberg:latest
     container_name: dl_debezium_server
+    environment:
+      # The AWS S3 client requires a region even though MinIO ignores it.
+      - AWS_REGION=us-east-1
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,7 +102,9 @@ services:
       - ./debezium/conf:/debezium/config
       - debezium_data:/debezium/data
 
-  # ---- Quick test receiver: confirms Debezium is emitting real CDC events ----
+  # ---- Optional: HTTP echo receiver used earlier to prove CDC events were
+  #      flowing before the Iceberg sink was working. Not required for the
+  #      current pipeline but left here in case it's useful again. ----
   echo-receiver:
     image: mendhak/http-https-echo:40
     container_name: dl_echo_receiver
