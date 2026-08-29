@@ -23,7 +23,11 @@ Snowflake-specific behavior (exact SQL dialect, clustering keys,
 transactional guarantees, streams/tasks) requires separate validation
 directly in Snowflake -- see "Not covered here" below.
 
-![Local data lake stack architecture](docs/images/architecture.svg)
+<a href="https://raw.githubusercontent.com/pramalin/datalake-local-test/master/docs/images/architecture.svg" target="_blank">
+  <img src="docs/images/architecture.svg" alt="Local data lake stack architecture" width="100%">
+</a>
+
+<p><em>Click the diagram to open the full-size SVG (Ctrl/Cmd + click for a new tab).</em></p>
 
 **Status: bronze/gold pipeline working end-to-end, idempotently.** The
 schema, SCD merge logic, and CDC capture are all validated — and following
@@ -188,7 +192,11 @@ current row. **A revocation behaves differently and deliberately does
 NOT open a new row** — see section 4's Q9 regression test, which checks
 exactly that.
 
-![Bronze/gold flow: how a change becomes a correct access-period record](docs/images/cdc-bronze-gold-flow.svg)
+<a href="https://raw.githubusercontent.com/pramalin/datalake-local-test/master/docs/images/cdc-bronze-gold-flow.svg" target="_blank">
+  <img src="docs/images/cdc-bronze-gold-flow.svg" alt="CDC bronze-to-gold processing flow" width="100%">
+</a>
+
+<p><em>Click the diagram to open the full-size SVG (Ctrl/Cmd + click for a new tab).</em></p>
 
 ### Idempotency
 
