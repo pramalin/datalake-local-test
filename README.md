@@ -59,35 +59,42 @@ Iceberg tables.
 `TROUBLESHOOTING.md` for why DBeaver's "Execute Script" mode has been
 unreliable with these files.
 
-## 4. Load the day-2 delta and test SCD merge logic
+## 4. Replay a clean historical scenario and answer real business questions
 
-The Postgres source (`postgres-init/01_schema.sql`) seeds:
-- `iam_denormalized` — day-1 state (5 grants)
-- `iam_denormalized_day2_delta` — day-2 changes (1 update/revoke, 1 new grant, 1 hard delete)
+The Postgres source (`postgres-init/01_schema.sql`) now seeds a genuinely
+clean day-1 state: three grants (Alice/Admin, Bob/Analyst, Carla/Admin),
+all active, dated Jan 5-7 -- nothing revoked or deleted is baked in. Every
+later event is demonstrated as a real, live change, not a pre-staged file.
 
-Load the delta into `iceberg.iam.stg_delta` (see `02_merge_delta.sql` for
-the staging table DDL), either via Trino's Postgres catalog federation
-(`INSERT INTO iceberg.iam.stg_delta SELECT * FROM postgres.public.iam_denormalized_day2_delta`)
-or manually.
+Run `demo/02_live_narrative.sql` **one statement at a time** against the
+direct Postgres connection. It plays out five dated events:
 
-Then run `lakehouse-sql/02_merge_delta.sql`. It applies both:
-- **Type 1** merge into `fact_access_grant` (overwrite — current state only)
-- **Type 2** merge into `fact_access_grant_history` (close old row, insert new versioned row)
+| Date | Event |
+|---|---|
+| Feb 1 | Carla's Admin access to billing-api is revoked |
+| Feb 10 | Alice is additionally granted Auditor access to audit-logs |
+| Feb 15 | A contractor is granted temporary access to staging-db |
+| Mar 1 | The contractor is offboarded -- their grant is **hard deleted** |
+| Mar 15 | Alice's original Admin access is revoked; a new hire is granted access |
 
-The sanity-check queries at the bottom demonstrate exactly the kind of
-point-in-time query ("what access existed as of Feb 1") that the history
-table needs to support for the client.
+After **each** event, re-run `lakehouse-sql/03_bronze_to_gold.sql` (see
+section 5) to advance the gold tables, then check the matching query in
+`lakehouse-sql/04_acceptance_queries.sql` -- each answers a real question
+an auditor might ask, such as:
 
-**Note:** this step validates the Type 1/Type 2 merge *logic* against a
-manually staged, synthetic delta — useful for proving the SQL is correct
-in isolation. Section 5 below replaces the manual staging with the real
-thing: the same merge pattern, sourced from Debezium's live, append-only
-bronze log instead of a hand-loaded file.
+- What active access did Alice have on January 31 (before any of this happened)?
+- Who had access to prod-db-01 on February 15?
+- Did the contractor's access exist on February 20?
+- When was the contractor's access removed, and was it a revoke or a hard delete?
 
-**Important:** load day-1 base data into `fact_access_grant` /
-`fact_access_grant_history` *before* running the merge, or you'll be
-merging against an empty table. See `TROUBLESHOOTING.md` for the exact
-symptom this produces if skipped.
+Because effective dating uses the *business* timestamps in the data
+(`granted_at`/`revoked_at`/`updated_at`), not the moment you happen to run
+each statement, these queries give correct historical answers regardless
+of when during the demo you actually replay the narrative.
+
+**Important:** build the star schema (section 3) before replaying any
+narrative events, and run `03_bronze_to_gold.sql` after loading the day-1
+seed too (so gold has a starting current-state), before applying Event A.
 
 ## 5. Debezium: live CDC capture, bronze/gold architecture
 
@@ -117,7 +124,7 @@ question the reviewer asked ("where does history come from if the live
 pipeline overwrites changes?") now has a real answer: **from bronze, which
 is never overwritten.**
 
-**Try it — this proves the whole chain, including that history is preserved:**
+**Try it — a quick single-event sanity check** (the full narrative walkthrough with real business questions is in section 4):
 ```sql
 -- against the direct Postgres connection, not Trino
 UPDATE iam_denormalized SET revoked_at = now(), updated_at = now() WHERE grant_id = 2;
@@ -216,12 +223,6 @@ implicit — some are appropriate to address before a client-facing demo,
 others are real production considerations intentionally out of scope for
 this local proof of concept:
 
-- **Day-1 seed data isn't a clean chronological scenario** —
-  `postgres-init/01_schema.sql` seeds some grants with revoke/delete
-  dates already in the past relative to the "day 1" snapshot. Fine for
-  exercising the merge logic, but a cleaner sequential scenario (grant →
-  revoke → new grant → delete, each as a distinct dated step) would be
-  easier to walk a client through.
 - **Record-level vs. access-level change conflation** — the current
   history table versions the whole grant row on any change (e.g., a
   `user_email` correction creates a new history version even though
