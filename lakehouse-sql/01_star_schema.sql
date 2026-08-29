@@ -62,3 +62,13 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.fact_access_grant_history (
     format = 'PARQUET',
     partitioning = ARRAY['day(effective_start)']
 );
+
+-- Reusable model object, not a one-off acceptance query: a safe view
+-- over current-state so BI consumers can't mistake "a row exists" for
+-- "access is currently active." fact_access_grant mirrors the source
+-- as-is, including revoked grants -- this view pre-applies the filter.
+CREATE OR REPLACE VIEW iceberg.iam.current_active_access AS
+SELECT *
+FROM iceberg.iam.fact_access_grant
+WHERE revoked_at IS NULL
+  AND is_deleted = false;

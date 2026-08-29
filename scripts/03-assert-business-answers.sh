@@ -80,6 +80,11 @@ assert_equals \
   "SELECT COUNT(*) FROM fact_access_grant_history WHERE user_id = 102 AND is_current = true" \
   "1"
 
+assert_equals \
+  "current_active_access view returns exactly 3 active grants (Bob, Alice's Auditor grant, Emma)" \
+  "SELECT COUNT(*) FROM current_active_access" \
+  "3"
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   echo "ALL ASSERTIONS PASSED"

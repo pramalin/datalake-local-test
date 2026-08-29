@@ -70,13 +70,10 @@ WHERE user_id = 104
 -- entirely (hard deleted, so no row exists here at all).
 SELECT * FROM iceberg.iam.fact_access_grant ORDER BY grant_id;
 
--- Q6b: the same thing, but safely -- a view so BI developers can't
--- accidentally treat "a row exists" as "access is currently active."
--- Run once; then query current_active_access directly instead of Q6.
-CREATE OR REPLACE VIEW iceberg.iam.current_active_access AS
-SELECT * FROM iceberg.iam.fact_access_grant
-WHERE revoked_at IS NULL AND is_deleted = false;
-
+-- Q6b: the same thing, but safely -- current_active_access (created in
+-- 01_star_schema.sql, alongside the tables it depends on, not here --
+-- it's a reusable model object, not a one-off acceptance query) applies
+-- that filter for you.
 SELECT * FROM iceberg.iam.current_active_access ORDER BY grant_id;
 
 -- Q7: Does replaying the bronze-to-gold merge with no new events change
