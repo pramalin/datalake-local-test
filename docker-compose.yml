@@ -82,6 +82,29 @@ services:
     depends_on:
       - iceberg-rest
 
+  # ---- Debezium Server: captures Postgres WAL changes, ships them to S3 ----
+  debezium-server:
+    image: debezium/server:3.0.0.Final
+    container_name: dl_debezium_server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./debezium/conf:/debezium/config
+      - debezium_data:/debezium/data
+
+  # ---- Quick test receiver: confirms Debezium is emitting real CDC events ----
+  echo-receiver:
+    image: mendhak/http-https-echo:40
+    container_name: dl_echo_receiver
+    environment:
+      - HTTP_PORT=8080
+    ports:
+      - "9080:8080"
+
 volumes:
   pg_data:
   minio_data:
+  debezium_data:

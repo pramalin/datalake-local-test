@@ -1,6 +1,6 @@
 -- These simulate what your daily merge job will do once real CDC/S3 delta
 -- files are landing. Point a Postgres connector at the source DB (see
--- trino/catalog/postgres.properties) or load the delta via CSV/CTAS —
+-- trino/catalog/postgres.properties) or load the delta via CSV/CTAS --
 -- either way, the MERGE logic below is what matters for schema validation.
 
 -- ------------------------------------------------------------
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.stg_delta (
 -- or INSERT VALUES manually to mirror 01_schema.sql's day-2 delta rows.
 
 -- ============================================================
--- TYPE 1 MERGE — current-state fact table (overwrite on change)
+-- TYPE 1 MERGE -- current-state fact table (overwrite on change)
 -- ============================================================
 
 MERGE INTO iceberg.iam.fact_access_grant AS target
@@ -52,7 +52,7 @@ WHEN NOT MATCHED AND source.op != 'd' THEN
             source.granted_at, source.revoked_at, source.updated_at, source.is_deleted);
 
 -- ============================================================
--- TYPE 2 MERGE — history table (close old version, insert new version)
+-- TYPE 2 MERGE -- history table (close old version, insert new version)
 -- Two-step pattern: Iceberg MERGE can't easily "insert + update" the same
 -- logical row in one statement, so this is done as two statements.
 -- ============================================================
@@ -90,7 +90,7 @@ SELECT * FROM iceberg.iam.fact_access_grant ORDER BY grant_id;
 -- History should show 2 rows for grant_id 1 (Admin), one closed, one... actually revoked closes it too
 SELECT * FROM iceberg.iam.fact_access_grant_history WHERE grant_id = 1 ORDER BY effective_start;
 
--- "As of" query — what access existed before the day-2 delta was applied
+-- "As of" query -- what access existed before the day-2 delta was applied
 SELECT * FROM iceberg.iam.fact_access_grant_history
 WHERE effective_start <= TIMESTAMP '2026-02-01 00:00:00'
   AND (effective_end IS NULL OR effective_end > TIMESTAMP '2026-02-01 00:00:00');

@@ -1,5 +1,5 @@
 -- Stand-in for the client's denormalized IAM view (~8GB in production).
--- Small sample here — the point is to validate schema shape, not volume.
+-- Small sample here -- the point is to validate schema shape, not volume.
 
 CREATE TABLE IF NOT EXISTS iam_denormalized (
     grant_id        BIGINT PRIMARY KEY,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS iam_denormalized_day2_delta (
     revoked_at      TIMESTAMP,
     updated_at      TIMESTAMP NOT NULL,
     is_deleted      BOOLEAN NOT NULL DEFAULT false,
-    op              CHAR(1) NOT NULL  -- 'c'=create, 'u'=update, 'd'=delete — mimics a Debezium event flag
+    op              CHAR(1) NOT NULL  -- 'c'=create, 'u'=update, 'd'=delete -- mimics a Debezium event flag
 );
 
 INSERT INTO iam_denormalized_day2_delta

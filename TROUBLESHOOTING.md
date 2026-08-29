@@ -159,6 +159,94 @@ step.
 
 ---
 
+## 6. `debezium/server:latest` — image not found
+
+**Symptom:**
+```
+Error response from daemon: failed to resolve reference "docker.io/debezium/server:latest": ...not found
+```
+
+**Root cause:** the official `debezium/server` image on Docker Hub has no
+`latest` tag — only explicit version tags (e.g. `3.0.0.Final`,
+`2.7.3.Final`). The whole `debezium` org on Docker Hub also hasn't
+published anything new in roughly two years; Debezium may have shifted
+primary publishing elsewhere since.
+
+**Fix:** pin to a real, verified tag:
+```yaml
+image: debezium/server:3.0.0.Final
+```
+
+---
+
+## 7. `Failed to load mandatory config value 'debezium.sink.type'`
+
+**Symptom:** Debezium Server starts, logs warnings about
+`application.properties.example`/`application.properties.cassandra.redis.example`
+being unrecognized config files, then fails with a missing
+`debezium.sink.type` error — even though `application.properties` was
+mounted and looked correct.
+
+**Root cause:** the volume was mounted to the wrong container path.
+Debezium Server reads config from **`/debezium/config`**, not
+`/debezium/conf`. The local folder can be named anything; the container
+path must be exactly `/debezium/config`.
+
+**Fix:**
+```yaml
+volumes:
+  - ./debezium/conf:/debezium/config   # right-hand side must be /debezium/config
+```
+
+---
+
+## 8. `No Debezium consumer named 's3' is available`
+
+**Symptom:** config loads correctly (no more `sink.type` error), but
+startup fails with this exact message, preceded by several
+`Unrecognized configuration key "quarkus.s3.*"` warnings.
+
+**Root cause:** `debezium/server:3.0.0.Final`'s bundled sinks do **not**
+include S3. Confirmed directly by listing the image's lib folder:
+```bash
+docker exec dl_debezium_server sh -c "ls /debezium/lib | grep -i debezium-server"
+```
+Bundled: `eventhubs`, `http`, `infinispan`, `kafka`, `kinesis`,
+`nats-jetstream`, `nats-streaming`, `pravega`, `pubsub`, `pulsar`,
+`rabbitmq`, `redis`, `rocketmq`, `sqs`. No `s3`.
+
+**Workaround used here:** switched to `debezium.sink.type=http` (confirmed
+bundled) pointed at a `mendhak/http-https-echo` container, to prove the
+WAL-capture mechanism works end-to-end without being blocked on the S3
+question. This is **not** the final architecture — just a way to get a
+real, verified "yes, CDC is working" checkpoint. Landing events in
+S3/Iceberg for real is an open follow-up (see README "Known limitation").
+
+---
+
+## 9. Postgres replication connections silently refused
+
+**Symptom:** would show up as Debezium failing to create a replication
+slot, or connection-refused-style errors specifically on the replication
+connection while normal queries work fine.
+
+**Root cause:** `pg_hba.conf`'s `all` database keyword does **not** cover
+replication connections — Postgres treats replication as a distinct
+connection type requiring its own explicit rule, even for `trust`/`md5`
+catch-all entries.
+
+**Fix:** add an init script that appends a replication-specific rule
+before the database starts for the first time:
+```bash
+# postgres-init/00_enable_replication.sh
+echo "host replication all all trust" >> "$PGDATA/pg_hba.conf"
+```
+Like the schema seed script, this only takes effect on a **fresh** volume
+— `docker compose down -v && docker compose up -d` if added after the
+first run.
+
+---
+
 ## General lesson
 
 Most of the above weren't bugs in the SQL or the architecture — they were

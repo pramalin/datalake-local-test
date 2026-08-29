@@ -4,7 +4,7 @@
 CREATE SCHEMA IF NOT EXISTS iceberg.iam;
 
 -- ============================================================
--- DIMENSIONS (flattened — star schema, not snowflake schema)
+-- DIMENSIONS (flattened -- star schema, not snowflake schema)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS iceberg.iam.dim_user (
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.dim_resource (
 ) WITH (format = 'PARQUET');
 
 -- ============================================================
--- FACT TABLE — Type 1 (current state, one row per grant)
+-- FACT TABLE -- Type 1 (current state, one row per grant)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS iceberg.iam.fact_access_grant (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.fact_access_grant (
 );
 
 -- ============================================================
--- HISTORY TABLE — Type 2 (effective-dated, full audit trail)
+-- HISTORY TABLE -- Type 2 (effective-dated, full audit trail)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS iceberg.iam.fact_access_grant_history (
