@@ -345,15 +345,68 @@ contains afterward.
 
 ---
 
+## 14. Upsert-mode sink silently discards history (design bug, not a technical one)
+
+**Symptom:** none -- this "worked" with no errors. Debezium's Iceberg sink
+with `upsert=true` correctly captured every CDC event and correctly
+updated the Iceberg table in place. The problem only surfaced under
+external review: an upsert *overwrites* the previous row, so the pipeline
+could capture every change but still could not answer "what did this
+grant look like before this change?" -- the very question the whole
+historical model exists to answer.
+
+**Root cause:** conflating two different jobs into one table. Upsert mode
+is correct for a *current-state* table, but the CDC landing table itself
+also needs to be the permanent record -- and a table that gets
+overwritten cannot serve as a permanent record.
+
+**Fix:** split into bronze (append-only, `upsert=false`) and gold (derived
+from bronze via a real merge). See README.md section 5 for the full
+design and `lakehouse-sql/03_bronze_to_gold.sql` for the implementation.
+This is the single most important fix to come out of this project --
+worth internalizing as a general pattern: **a CDC sink that overwrites is
+a current-state cache, not a history log. If you need history, land the
+raw events append-only first, and derive current-state and historical
+views from that log separately.**
+
+---
+
+## 15. After a full reset, only some star-schema tables existed
+
+**Symptom:** after `docker compose down -v` (needed to reset the Iceberg
+catalog when switching sink modes), `SHOW TABLES FROM iceberg.iam` showed
+`fact_access_grant_history` but not `dim_user`, `dim_role`, `dim_resource`,
+or `fact_access_grant` -- and a subsequent merge script failed with
+`Table 'iceberg.iam.fact_access_grant' does not exist`, despite
+`01_star_schema.sql` having apparently been run.
+
+**Root cause:** the same DBeaver "Execute Script" partial-failure pattern
+documented in issue #3, recurring after a full environment reset. A script
+run can silently stop partway through without a clearly visible error,
+leaving some `CREATE TABLE` statements executed and later ones skipped.
+
+**Fix / standing practice:** after *any* full reset, don't assume
+`01_star_schema.sql` completed -- verify with `SHOW TABLES FROM
+iceberg.iam` and confirm the expected table count before proceeding to
+any script that depends on those tables existing. Running DDL scripts
+statement-by-statement rather than as a full script remains the more
+reliable path with this DBeaver/Trino combination.
+
+---
+
 ## Final resolution
 
-The full pipeline — PostgreSQL (WAL, pgoutput) -> Debezium Server
-(`debezium-server-iceberg`, upsert mode) -> Apache Iceberg REST catalog
-(`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables -- is confirmed
-working end to end, including live upserts from real Postgres `UPDATE`
-statements landing correctly in the Iceberg table within seconds, with no
-manual staging or merge step required. See `README.md` section 5 for the
-final working configuration.
+The full pipeline -- PostgreSQL (WAL, pgoutput) -> Debezium Server
+(`debezium-server-iceberg`, **append-only bronze sink**) -> Apache Iceberg
+REST catalog (`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables,
+with an **idempotent, watermark-tracked bronze-to-gold merge** deriving
+current-state and effective-dated history -- is confirmed working end to
+end. Verified directly: a live Postgres `UPDATE` lands as a new,
+non-destructive row in the bronze log; the gold merge correctly derives
+two history versions from it; and re-running the merge with no new bronze
+events leaves both gold tables' row counts and current-version counts
+exactly unchanged. See `README.md` section 5 for the final architecture
+and `lakehouse-sql/03_bronze_to_gold.sql` for the implementation.
 
 ---
 
