@@ -66,7 +66,7 @@ assert_equals \
   "0"
 
 assert_equals \
-  "Total history row count matches the access-period model (6: one row per grant, no phantom rows from revocations/deletes)" \
+  "Total history row count matches THIS DEMO SCENARIO (6: one row per grant, no phantom rows from revocations/deletes -- scenario-specific, not a generic pipeline invariant)" \
   "SELECT COUNT(*) FROM fact_access_grant_history" \
   "6"
 

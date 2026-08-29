@@ -22,7 +22,7 @@
   <rect x="280" y="95" width="220" height="140" rx="10" fill="#2E3E8F"/>
   <text x="390" y="135" font-size="17" font-weight="bold" fill="#FFFFFF" text-anchor="middle">Debezium Server</text>
   <text x="390" y="157" font-size="12" fill="#CADCFC" text-anchor="middle">debezium-server-iceberg</text>
-  <text x="390" y="175" font-size="12" fill="#CADCFC" text-anchor="middle">upsert mode</text>
+  <text x="390" y="175" font-size="12" fill="#CADCFC" text-anchor="middle">append-only bronze</text>
   <text x="390" y="193" font-size="12" fill="#CADCFC" text-anchor="middle">unwrap transform</text>
   <text x="390" y="211" font-size="12" fill="#CADCFC" text-anchor="middle">no Kafka</text>
 
@@ -56,5 +56,5 @@
   <line x1="780" y1="330" x2="950" y2="330" stroke="#5B6B9E" stroke-width="2" stroke-dasharray="4,4"/>
   <line x1="950" y1="330" x2="950" y2="235" stroke="#5B6B9E" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow)"/>
 
-  <text x="30" y="400" font-size="12" fill="#9AA5C7">Live UPDATE in Postgres &#8594; upserted into the Iceberg table within seconds, verified end-to-end.</text>
+  <text x="30" y="400" font-size="12" fill="#9AA5C7">Live change in Postgres &#8594; appended to bronze &#8594; merged into gold current-state + access-period history.</text>
 </svg>

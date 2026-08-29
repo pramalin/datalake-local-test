@@ -98,6 +98,14 @@ The five events (`demo_events/01_*.sql` through `05_*.sql`):
 | Mar 1 | The contractor is offboarded -- their grant is **hard deleted** |
 | Mar 15 | Alice's original Admin access is revoked; a new hire is granted access |
 
+**"Mar 1" above is a scenario label, not a reproducible business
+timestamp.** Every OTHER date in this table is real -- it's set directly
+in the data (`revoked_at`/`updated_at`) and the gold merge uses it
+exactly. The hard-delete row is the one exception: Postgres never sends
+a business-level "deleted at" value for a hard delete, so that event's
+`effective_end` reflects whenever you actually ran the demo, not March 1.
+See section 5's note on delete-timestamp handling.
+
 `lakehouse-sql/04_acceptance_queries.sql` answers real questions an
 auditor might ask, such as:
 
@@ -105,6 +113,12 @@ auditor might ask, such as:
 - Who had access to prod-db-01 on February 15?
 - Did the contractor's access exist on February 20?
 - When was the contractor's access removed, and was it a revoke or a hard delete?
+
+The queries also create `iceberg.iam.current_active_access`, a view over
+`fact_access_grant` that pre-applies the `revoked_at IS NULL AND
+is_deleted = false` filter -- safer for downstream BI consumers than
+querying `fact_access_grant` directly and risking "a row exists" being
+mistaken for "access is currently active."
 
 Because effective dating uses the *business* timestamps in the data
 (`granted_at`/`revoked_at`/`updated_at`) for creates/updates, these
@@ -138,7 +152,7 @@ overwriting the very history it was meant to preserve.
 | Layer | Table | Write mode | Purpose |
 |---|---|---|---|
 | Bronze | `bronze_dev_iam_public_iam_denormalized` | **Append-only** (`upsert=false`) | Immutable log of every CDC event, including deletes. Never overwritten. |
-| Gold | `fact_access_grant` (Type 1), `fact_access_grant_history` (Type 2) | Derived via `lakehouse-sql/03_bronze_to_gold.sql` | Current-state and effective-dated history, rebuilt from bronze |
+| Gold | `fact_access_grant` (Type 1), `fact_access_grant_history` (Type 2) | Derived via `lakehouse-sql/03_bronze_to_gold.sql` | Current-state and access-period history. In this demo, incrementally derived from bronze -- merged after each narrative event. A production version must process every bronze event in source order for history (see "Known limitations"). |
 
 Debezium now only ever **appends** to bronze. The gold tables are derived
 from that permanent log by a separate, idempotent merge script — the same
@@ -149,7 +163,8 @@ is never overwritten.**
 **Try it — a quick single-event sanity check** (the full narrative walkthrough with real business questions is in section 4):
 ```sql
 -- against the direct Postgres connection, not Trino
-UPDATE iam_denormalized SET revoked_at = now(), updated_at = now() WHERE grant_id = 2;
+-- Bob's role is upgraded (NOT a revocation -- revoked_at stays NULL)
+UPDATE iam_denormalized SET role_id = 1, role_name = 'Admin', role_category = 'Privileged', updated_at = now() WHERE grant_id = 2;
 ```
 
 Wait a few seconds, then confirm bronze got a **new row**, not an overwrite:
@@ -165,11 +180,15 @@ Then run `lakehouse-sql/03_bronze_to_gold.sql` and check:
 ```sql
 SELECT * FROM iceberg.iam.fact_access_grant_history WHERE grant_id = 2 ORDER BY effective_start;
 ```
-You should see **two versions** — the original closed out
-(`is_current = false`, `effective_end` set) and the new one current — both
-derived from the real, permanent bronze log.
+You should see **two versions** — the original (Analyst) closed out
+(`is_current = false`, `effective_end` set) and the new one (Admin)
+current — both derived from the real, permanent bronze log. This is a
+genuine record update, not a revocation, so it correctly opens a new
+current row. **A revocation behaves differently and deliberately does
+NOT open a new row** — see section 4's Q9 regression test, which checks
+exactly that.
 
-![CDC upsert flow: Postgres UPDATE to Iceberg row, end to end](docs/images/cdc-upsert-flow.svg)
+![Bronze/gold flow: how a change becomes a correct access-period record](docs/images/cdc-bronze-gold-flow.svg)
 
 ### Idempotency
 
@@ -264,7 +283,11 @@ ALTER TABLE iam_denormalized REPLICA IDENTITY FULL;
   wrong. `scripts/03-assert-business-answers.sh` asserts specific,
   correct answers (including a direct regression test for the
   revocation bug in TROUBLESHOOTING.md issue #18), not just row-count
-  stability. (Confirmed yes, as of the access-period model fix.)
+  stability. (Confirmed yes, as of the access-period model fix.) **Note:**
+  these assertions -- including the exact "6 history rows" check -- are
+  a **demo acceptance test tied to this specific narrative**, not a
+  generic pipeline invariant; a different scenario would correctly
+  produce a different row count.
 
 ## Known limitations (documented, not yet built)
 

@@ -460,26 +460,6 @@ time.
 
 ---
 
-## Final resolution
-
-The full pipeline -- PostgreSQL (WAL, pgoutput) -> Debezium Server
-(`debezium-server-iceberg`, **append-only bronze sink**) -> Apache Iceberg
-REST catalog (`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables,
-with an **idempotent, watermark-tracked bronze-to-gold merge** deriving
-current-state and effective-dated history -- is confirmed working end to
-end, via fully automated, non-interactive scripts (`scripts/run-full-demo.sh`).
-Verified directly: a live Postgres `UPDATE`/`INSERT`/`DELETE` lands
-correctly in the append-only bronze log; the gold merge correctly derives
-history including the hard-delete case; re-running the merge with no new
-bronze events leaves both gold tables' row counts exactly unchanged
-(enforced by an automated check, not manual inspection); and a subtle
-delete-timestamp bug was caught and fixed specifically because the
-acceptance tests existed. See `README.md` sections 4-5 for the final
-architecture and `lakehouse-sql/03_bronze_to_gold.sql` for the
-implementation.
-
----
-
 ## 18. Revoked grants showed as active forever (the most serious finding yet)
 
 **Symptom:** caught by a second round of external review, not by the
@@ -528,6 +508,74 @@ capture time (whenever the demo was actually run), not a business
 date. Asserting the narrative date would pass by coincidence today and
 fail on a later re-run. This is the same tradeoff documented in issue
 #17, now correctly reflected in the tests instead of silently ignored.
+
+---
+
+## 19. A "fixed" script wasn't actually wired in, and diagrams went stale
+
+**Symptom:** caught by a THIRD round of external review. Two separate
+issues, same underlying cause:
+
+1. `scripts/00-setup_v2.sh` contained the setup-timeout fix, but
+   `scripts/run-full-demo.sh` still called `scripts/00-setup.sh` (the
+   unfixed original) -- both files existed side by side in the repo
+   after a previous commit, and only one of them was actually renamed
+   over the original. The commit message and README claimed the fix
+   was live; the code path the demo actually runs did not contain it.
+2. `docs/images/architecture.svg` and the flow diagram still described
+   the retired upsert-only design (literally said "upsert mode" and
+   "no dupes") -- they were never updated when the bronze/gold
+   architecture replaced upsert mode several commits earlier.
+
+**Root cause (both cases):** editing/creating a new version of a file
+without confirming the OLD version was fully replaced and every
+reference to it updated. This is the same class of mistake as issue #13
+(config edits not landing) and issue #15 (partial script execution) --
+a change existing somewhere is not the same as a change being in the
+path that actually runs, or the artifact a viewer actually sees.
+
+**Fix:** `00-setup_v2.sh` was merged into `00-setup.sh` (the duplicate
+removed, not just left alongside); both diagrams were redrawn to
+accurately show bronze (append-only) -> gold (current-state and
+access-period history) -> query, replacing every "upsert" reference.
+`cdc-upsert-flow.svg` was renamed to `cdc-bronze-gold-flow.svg` so the
+filename itself doesn't perpetuate the retired model.
+
+**Standing practice going forward:** when a fix produces a new file
+version, rename over the original in the same step, never leave both;
+when architecture changes, grep the repo for the old model's keywords
+(e.g. "upsert") across ALL file types, not just `.sql`/`.md` -- SVGs and
+other non-code assets go stale silently and are easy to forget.
+
+---
+
+## Final resolution
+
+The full pipeline -- PostgreSQL (WAL, pgoutput) -> Debezium Server
+(`debezium-server-iceberg`, **append-only bronze sink**) -> Apache Iceberg
+REST catalog (`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables,
+with an **idempotent, watermark-tracked bronze-to-gold merge** implementing
+the **access-period model** -- is confirmed correct, not just stable, via
+fully automated, non-interactive scripts (`scripts/run-full-demo.sh`).
+
+This took three rounds of external review to get right, and each round
+found something real:
+
+1. The CDC sink upserted instead of appending, silently discarding history.
+2. The gold merge treated a revocation as an ordinary update, leaving
+   revoked grants showing as active forever -- the most serious finding,
+   since it broke the exact question this project exists to answer.
+3. A "fixed" script wasn't actually wired into the path the demo runs,
+   and both architecture diagrams still described the retired design.
+
+All three are now fixed and verified with evidence, not just claimed:
+a live Postgres change lands correctly in the append-only bronze log; a
+revoked grant correctly stops appearing as active in any "as of" query
+after its revocation date (the exact regression the second review
+caught); the merge is idempotent; and `scripts/03-assert-business-answers.sh`
+asserts specific correct answers, not just row-count stability. See
+`README.md` sections 4-5 for the final architecture and
+`lakehouse-sql/03_bronze_to_gold.sql` for the implementation.
 
 ---
 
