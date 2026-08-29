@@ -19,6 +19,8 @@ Apache Iceberg is the closest open equivalent to how Snowflake actually
 manages tables under the hood, and Snowflake natively supports querying
 Iceberg tables — so schema/logic validated here should translate cleanly.
 
+![Local data lake stack architecture](docs/images/architecture.svg)
+
 **Status: fully working end-to-end.** Schema and SCD merge logic are
 validated, and Debezium Server now writes real Postgres CDC events —
 snapshot and live streaming, inserts/updates/deletes — directly into
@@ -103,6 +105,8 @@ count, new `revoked_at`/`updated_at`, `__op` showing `u` — proof the whole
 chain (WAL → Debezium → Iceberg REST catalog → S3 Parquet) is live and
 correct.
 
+![CDC upsert flow: Postgres UPDATE to Iceberg row, end to end](docs/images/cdc-upsert-flow.svg)
+
 ### How the S3/Iceberg sink question got resolved
 
 This took real trial and error, documented in full in `TROUBLESHOOTING.md`.
@@ -122,16 +126,6 @@ The short version:
      Iceberg project's own reference image, which does support v3.
    - The AWS S3 client needs an explicit **region** even though MinIO
      ignores it — added `AWS_REGION=us-east-1`.
-
-### REPLICA IDENTITY note
-
-`iam_denormalized` currently has `REPLICA IDENTITY DEFAULT`, so
-update/delete events only carry previous values for primary-key columns,
-not the full old row. For IAM data where "what changed" matters for audit
-purposes, consider:
-```sql
-ALTER TABLE iam_denormalized REPLICA IDENTITY FULL;
-```
 
 ### REPLICA IDENTITY note
 

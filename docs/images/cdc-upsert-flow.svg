@@ -1,0 +1,49 @@
+<svg viewBox="0 0 1000 320" xmlns="http://www.w3.org/2000/svg" font-family="Georgia, 'Times New Roman', serif">
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5B6B9E"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="320" fill="#FFFFFF"/>
+
+  <text x="30" y="38" font-size="20" font-weight="bold" fill="#1E2761">A Live Change, End to End</text>
+
+  <!-- Step 1 -->
+  <rect x="30" y="80" width="210" height="90" rx="10" fill="#F4F6FC" stroke="#E3E7F5"/>
+  <text x="135" y="112" font-size="13" font-weight="bold" fill="#1E2761" text-anchor="middle">1. UPDATE in Postgres</text>
+  <text x="135" y="134" font-size="11" fill="#5B6B9E" text-anchor="middle" font-family="Courier New, monospace">UPDATE iam_denormalized</text>
+  <text x="135" y="150" font-size="11" fill="#5B6B9E" text-anchor="middle" font-family="Courier New, monospace">SET revoked_at = now()</text>
+
+  <line x1="240" y1="125" x2="290" y2="125" stroke="#5B6B9E" stroke-width="2" marker-end="url(#arrow2)"/>
+
+  <!-- Step 2 -->
+  <rect x="290" y="80" width="210" height="90" rx="10" fill="#F4F6FC" stroke="#E3E7F5"/>
+  <text x="395" y="112" font-size="13" font-weight="bold" fill="#1E2761" text-anchor="middle">2. WAL emits change</text>
+  <text x="395" y="134" font-size="11" fill="#5B6B9E" text-anchor="middle">pgoutput logical</text>
+  <text x="395" y="150" font-size="11" fill="#5B6B9E" text-anchor="middle">decoding plugin</text>
+
+  <line x1="500" y1="125" x2="550" y2="125" stroke="#5B6B9E" stroke-width="2" marker-end="url(#arrow2)"/>
+
+  <!-- Step 3 -->
+  <rect x="550" y="80" width="210" height="90" rx="10" fill="#F4F6FC" stroke="#E3E7F5"/>
+  <text x="655" y="106" font-size="13" font-weight="bold" fill="#1E2761" text-anchor="middle">3. Debezium Server</text>
+  <text x="655" y="128" font-size="11" fill="#5B6B9E" text-anchor="middle">unwrap transform</text>
+  <text x="655" y="144" font-size="11" fill="#5B6B9E" text-anchor="middle">flattens before/after</text>
+  <text x="655" y="160" font-size="11" fill="#5B6B9E" text-anchor="middle">adds op, table, db</text>
+
+  <line x1="760" y1="125" x2="810" y2="125" stroke="#5B6B9E" stroke-width="2" marker-end="url(#arrow2)"/>
+
+  <!-- Step 4 -->
+  <rect x="810" y="80" width="160" height="90" rx="10" fill="#1E2761"/>
+  <text x="890" y="112" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">4. Iceberg</text>
+  <text x="890" y="130" font-size="13" font-weight="bold" fill="#FFFFFF" text-anchor="middle">upsert</text>
+  <text x="890" y="152" font-size="11" fill="#CADCFC" text-anchor="middle">row updated</text>
+  <text x="890" y="166" font-size="11" fill="#CADCFC" text-anchor="middle">in place, no dupes</text>
+
+  <!-- result -->
+  <rect x="30" y="210" width="940" height="80" rx="10" fill="#F4F6FC" stroke="#E3E7F5"/>
+  <text x="55" y="238" font-size="13" font-weight="bold" fill="#1E2761">Result, queried from Trino:</text>
+  <text x="55" y="262" font-size="12" fill="#5B6B9E" font-family="Courier New, monospace">SELECT * FROM iceberg.iam.cdc_dev_iam_public_iam_denormalized WHERE grant_id = 3;</text>
+  <text x="55" y="280" font-size="11" fill="#9AA5C7">Same row count &#8226; revoked_at updated &#8226; __op = 'u' &#8226; no manual staging table, no separate merge job</text>
+</svg>
