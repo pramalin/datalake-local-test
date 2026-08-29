@@ -1,0 +1,4 @@
+# Docker volumes are named volumes, not bind mounts, so nothing local to ignore there,
+# but keep this in case anyone adds bind-mounted data dirs later
+*.log
+.DS_Store

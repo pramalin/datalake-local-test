@@ -1,0 +1,87 @@
+
+services:
+  # ---- Source OLTP database (stand-in for the client's PostgreSQL) ----
+  postgres:
+    image: postgres:16
+    container_name: dl_postgres
+    environment:
+      POSTGRES_DB: iam_source
+      POSTGRES_USER: iam_user
+      POSTGRES_PASSWORD: iam_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d
+      - pg_data:/var/lib/postgresql/data
+    command: ["postgres", "-c", "wal_level=logical"]  # ready for Debezium later, unused for now
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iam_user -d iam_source"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---- S3-compatible object storage (stand-in for AWS S3) ----
+  minio:
+    image: minio/minio:latest
+    container_name: dl_minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---- One-shot job: create the bucket the lakehouse will use ----
+  minio-init:
+    image: minio/mc:latest
+    container_name: dl_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/datalake &&
+      echo 'bucket ready'
+      "
+
+  # ---- Iceberg REST catalog: tracks table metadata (schema, snapshots, partitions) ----
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: dl_iceberg_rest
+    environment:
+      CATALOG_WAREHOUSE: s3://datalake/warehouse
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_S3_PATH_STYLE_ACCESS: "true"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+    ports:
+      - "8181:8181"
+    depends_on:
+      - minio-init
+
+  # ---- Trino: the SQL query engine, plays the role Snowflake plays in production ----
+  trino:
+    image: trinodb/trino:latest
+    container_name: dl_trino
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+    depends_on:
+      - iceberg-rest
+
+volumes:
+  pg_data:
+  minio_data:
