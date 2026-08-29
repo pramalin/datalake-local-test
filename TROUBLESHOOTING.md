@@ -394,6 +394,72 @@ reliable path with this DBeaver/Trino combination.
 
 ---
 
+## 16. Automated scripts replace manual DBeaver execution
+
+Given how many issues above (#2, #3, #15, and effectively #13) trace back
+to manually running SQL through DBeaver -- wrong connection tab, partial
+script execution, forgotten steps -- `scripts/` now drives the entire
+setup, narrative replay, and verification non-interactively through
+`psql` and the Trino CLI:
+
+- `scripts/run-postgres.sh` / `scripts/run-trino.sh` -- generic file
+  runners, `set -euo pipefail`, stop on first error
+- `scripts/00-setup.sh` -- star schema + seed gold from day-1 bronze,
+  with a real readiness poll for Trino (its container reports "Started"
+  well before its coordinator actually accepts queries)
+- `scripts/01-replay-narrative.sh` -- replays `demo_events/*.sql` one at
+  a time, merging gold after **each** event (not batched -- batching
+  would let the bronze-to-gold merge's per-run dedup silently collapse
+  a create+delete pair into just the delete, discarding history for
+  that grant entirely)
+- `scripts/02-verify.sh` -- acceptance queries plus a real idempotency
+  proof: captures gold row counts, re-runs the merge with no new events,
+  and **fails the script (`exit 1`)** if counts changed
+- `scripts/run-full-demo.sh` -- full reset through verification in one
+  command, for a clean rehearsal before presenting
+
+This is the recommended way to run the project now; see README.md
+section 4.
+
+---
+
+## 17. Hard-deleted grant's history closed with epoch timestamp, not a real date
+
+**Symptom:** caught by the new automated acceptance tests (issue #16),
+not visible from "no error" runs. `04_acceptance_queries.sql`'s Q4
+(contractor's grant history) returned a row with `effective_end =
+1970-01-01 00:00:00` instead of a real date, and Q5 (was the contractor's
+access active on a date it should have been) incorrectly returned zero
+rows -- the corrupted `effective_end` made the history row look like it
+had expired before it started.
+
+**Root cause:** the bronze-to-gold merge used `source.updated_at` to set
+`effective_end` when closing out a deleted grant's history row. Under
+`REPLICA IDENTITY DEFAULT` (the default, see issue #9's related note),
+a delete event's "before" image only carries primary-key columns --
+`updated_at` comes through as `NULL` for a delete, and that `NULL` was
+rendering as Unix epoch rather than propagating as a true `NULL` or a
+meaningful date.
+
+**Why `REPLICA IDENTITY FULL` alone would NOT have fixed this:** it's
+tempting to assume the fix is just capturing the full "before" row on
+delete. It isn't -- even with `FULL`, the "before" image's `updated_at`
+reflects when the grant was last changed *before* deletion (e.g. when it
+was granted), not *when it was deleted*. Hard deletes carry no
+business-level "deleted at" timestamp at all, full stop.
+
+**Fix:** for delete events specifically, effective-dating falls back to
+Debezium's own capture timestamp (`__source_ts_ns`, converted from
+nanoseconds) rather than the row's `updated_at`. Creates/updates continue
+using the real business timestamp. This is a documented, deliberate
+tradeoff (see README.md's "Known limitations" -- bitemporal modeling),
+not a complete solution: a production system should either add an
+application-level `deleted_at` audit column, or explicitly accept that
+delete effective-dating uses system/capture time rather than business
+time.
+
+---
+
 ## Final resolution
 
 The full pipeline -- PostgreSQL (WAL, pgoutput) -> Debezium Server
@@ -401,12 +467,16 @@ The full pipeline -- PostgreSQL (WAL, pgoutput) -> Debezium Server
 REST catalog (`apache/iceberg-rest-fixture`) -> S3/MinIO Parquet tables,
 with an **idempotent, watermark-tracked bronze-to-gold merge** deriving
 current-state and effective-dated history -- is confirmed working end to
-end. Verified directly: a live Postgres `UPDATE` lands as a new,
-non-destructive row in the bronze log; the gold merge correctly derives
-two history versions from it; and re-running the merge with no new bronze
-events leaves both gold tables' row counts and current-version counts
-exactly unchanged. See `README.md` section 5 for the final architecture
-and `lakehouse-sql/03_bronze_to_gold.sql` for the implementation.
+end, via fully automated, non-interactive scripts (`scripts/run-full-demo.sh`).
+Verified directly: a live Postgres `UPDATE`/`INSERT`/`DELETE` lands
+correctly in the append-only bronze log; the gold merge correctly derives
+history including the hard-delete case; re-running the merge with no new
+bronze events leaves both gold tables' row counts exactly unchanged
+(enforced by an automated check, not manual inspection); and a subtle
+delete-timestamp bug was caught and fixed specifically because the
+acceptance tests existed. See `README.md` sections 4-5 for the final
+architecture and `lakehouse-sql/03_bronze_to_gold.sql` for the
+implementation.
 
 ---
 

@@ -66,8 +66,25 @@ clean day-1 state: three grants (Alice/Admin, Bob/Analyst, Carla/Admin),
 all active, dated Jan 5-7 -- nothing revoked or deleted is baked in. Every
 later event is demonstrated as a real, live change, not a pre-staged file.
 
-Run `demo/02_live_narrative.sql` **one statement at a time** against the
-direct Postgres connection. It plays out five dated events:
+**Recommended: run it via the scripts, not manually.** Running SQL one
+statement at a time by hand (via DBeaver) is what produced most of the
+issues in `TROUBLESHOOTING.md` -- wrong connection tab, partial script
+execution, and so on. `scripts/` drives the whole thing through `psql`
+and the Trino CLI instead, non-interactively:
+
+```bash
+chmod +x scripts/*.sh
+./scripts/run-full-demo.sh
+```
+
+This resets the environment, builds the star schema, seeds gold from the
+day-1 bronze snapshot, replays all five narrative events below (merging
+gold after **each one** -- not batched, see the comment in
+`scripts/01-replay-narrative.sh` for why that matters), then runs the
+acceptance queries and proves idempotency, failing loudly
+(`exit 1`) if a re-run ever changes gold's row counts.
+
+The five events (`demo_events/01_*.sql` through `05_*.sql`):
 
 | Date | Event |
 |---|---|
@@ -77,10 +94,8 @@ direct Postgres connection. It plays out five dated events:
 | Mar 1 | The contractor is offboarded -- their grant is **hard deleted** |
 | Mar 15 | Alice's original Admin access is revoked; a new hire is granted access |
 
-After **each** event, re-run `lakehouse-sql/03_bronze_to_gold.sql` (see
-section 5) to advance the gold tables, then check the matching query in
-`lakehouse-sql/04_acceptance_queries.sql` -- each answers a real question
-an auditor might ask, such as:
+`lakehouse-sql/04_acceptance_queries.sql` answers real questions an
+auditor might ask, such as:
 
 - What active access did Alice have on January 31 (before any of this happened)?
 - Who had access to prod-db-01 on February 15?
@@ -88,13 +103,16 @@ an auditor might ask, such as:
 - When was the contractor's access removed, and was it a revoke or a hard delete?
 
 Because effective dating uses the *business* timestamps in the data
-(`granted_at`/`revoked_at`/`updated_at`), not the moment you happen to run
-each statement, these queries give correct historical answers regardless
-of when during the demo you actually replay the narrative.
+(`granted_at`/`revoked_at`/`updated_at`) for creates/updates, these
+queries give correct historical answers regardless of when during the
+demo you actually replay the narrative. **Hard deletes are the one
+exception** -- see the note on delete timestamps in section 5.
 
-**Important:** build the star schema (section 3) before replaying any
-narrative events, and run `03_bronze_to_gold.sql` after loading the day-1
-seed too (so gold has a starting current-state), before applying Event A.
+**To run it manually instead** (e.g. to inspect intermediate state):
+build the star schema (section 3), then run `lakehouse-sql/03_bronze_to_gold.sql`
+once to seed gold from the day-1 snapshot, then apply each
+`demo_events/*.sql` file to Postgres one at a time, re-running
+`03_bronze_to_gold.sql` after each one.
 
 ## 5. Debezium: live CDC capture, bronze/gold architecture
 
@@ -185,12 +203,34 @@ The short version:
    - The AWS S3 client needs an explicit **region** even though MinIO
      ignores it — added `AWS_REGION=us-east-1`.
 
-### REPLICA IDENTITY note
+### REPLICA IDENTITY note and delete-timestamp handling
 
 `iam_denormalized` currently has `REPLICA IDENTITY DEFAULT`, so
 update/delete events only carry previous values for primary-key columns,
-not the full old row. For IAM data where "what changed" matters for audit
-purposes, consider:
+not the full old row. This isn't just a theoretical gap -- it caused a
+real bug, caught by the automated acceptance tests
+(`scripts/02-verify.sh`): a hard-deleted grant's closing `effective_end`
+was being derived from `updated_at`, which is `NULL` on a delete under
+`DEFAULT` identity, and that `NULL` was rendering as Unix epoch
+(1970-01-01) instead of a real date -- which made the deleted grant's
+history row look like it had "expired before it began," silently hiding
+real historical access from any "as of" query that should have found it.
+
+**The fix** (in `lakehouse-sql/03_bronze_to_gold.sql`): for delete events
+specifically, effective-dating falls back to Debezium's own capture
+timestamp (`__source_ts_ns`) rather than the row's `updated_at`. This is
+a deliberate choice, not a full solution -- **hard deletes have no
+business-level "deleted at" timestamp at all**, since Postgres never
+records one. `REPLICA IDENTITY FULL` would give deletes the full "before"
+row, but that row's `updated_at` reflects when the grant was *last
+changed before* deletion, not when it was *deleted* -- it would not have
+fixed this. A production system for a regulated environment should treat
+this explicitly: either add an application-level `deleted_at` audit
+column, or explicitly document (as here) that delete effective-dating
+uses capture time, not business time.
+
+For IAM data where "what changed" matters for audit purposes on
+*updates* (not deletes), consider:
 ```sql
 ALTER TABLE iam_denormalized REPLICA IDENTITY FULL;
 ```
@@ -235,6 +275,10 @@ this local proof of concept:
 - **Bitemporal modeling** — retroactive corrections (a change entered
   today with an effective date in the past) aren't handled; the model
   assumes `source_changed_at` and business-effective time are the same.
+  **This is not just theoretical**: hard deletes concretely demonstrate
+  the gap, since they carry no business timestamp at all and fall back
+  to capture time (see section 5's REPLICA IDENTITY note) -- a real,
+  caught-by-testing instance of exactly this limitation.
 - **Delete semantics** — deletes currently close the access period
   without inserting an explicit tombstone row; `is_deleted` in the
   history table is populated but not the primary signal. Worth a single,

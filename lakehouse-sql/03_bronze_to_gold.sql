@@ -25,10 +25,24 @@ CREATE TABLE IF NOT EXISTS iceberg.iam.gold_merge_watermark (
 -- restricted to events newer than the watermark. The ROW_NUMBER dedup is
 -- what makes this safe even if bronze has multiple events per grant_id
 -- since the last run (e.g. two quick updates to the same grant).
+--
+-- business_ts: for creates/updates, the row's own updated_at is a real,
+-- app-set business timestamp. For a DELETE, there is no such thing --
+-- under REPLICA IDENTITY DEFAULT (the default here) a delete's "before"
+-- image only carries primary-key columns, so updated_at comes through
+-- NULL. Deletes fall back to Debezium's own capture time
+-- (__source_ts_ns) as the best available record of when the deletion
+-- actually happened -- this is a deliberate, documented choice (see
+-- README.md "Known limitations" -- hard deletes have no business-level
+-- "deleted at" timestamp at all), not an oversight.
 DROP TABLE IF EXISTS iceberg.iam.stg_bronze_batch;
 CREATE TABLE iceberg.iam.stg_bronze_batch AS
 SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
-       updated_at, is_deleted, __op AS op, __source_ts_ns
+       updated_at, is_deleted, __op AS op, __source_ts_ns,
+       CASE
+           WHEN __op = 'd' THEN from_unixtime(CAST(__source_ts_ns AS DOUBLE) / 1000000000)
+           ELSE updated_at
+       END AS business_ts
 FROM (
     SELECT *,
            ROW_NUMBER() OVER (PARTITION BY grant_id ORDER BY __source_ts_ns DESC) AS rn
@@ -60,10 +74,11 @@ WHEN NOT MATCHED AND source.op != 'd' THEN
             source.granted_at, source.revoked_at, source.updated_at, source.is_deleted);
 
 -- Step 3: Type 2 -- close out the currently-active version for any
--- grant_id touched in this batch.
+-- grant_id touched in this batch. Uses business_ts, NOT updated_at
+-- directly, so deletes close out with a real timestamp instead of NULL.
 UPDATE iceberg.iam.fact_access_grant_history
 SET effective_end = (
-        SELECT updated_at FROM iceberg.iam.stg_bronze_batch b
+        SELECT business_ts FROM iceberg.iam.stg_bronze_batch b
         WHERE b.grant_id = fact_access_grant_history.grant_id
     ),
     is_current = false
@@ -74,7 +89,7 @@ WHERE is_current = true
 -- the row above; no new "current" version for a deleted grant).
 INSERT INTO iceberg.iam.fact_access_grant_history
 SELECT grant_id, user_id, role_id, resource_id, granted_at, revoked_at,
-       updated_at AS effective_start,
+       business_ts AS effective_start,
        NULL AS effective_end,
        true AS is_current,
        is_deleted
