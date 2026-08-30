@@ -180,6 +180,12 @@ chmod +x scripts/*.sh
 ./scripts/run-full-demo.sh
 ```
 
+**See [`docs/sample-demo-run.md`](docs/sample-demo-run.md) for a real,
+annotated log of this script running end to end** — every phase
+explained, including exactly what each row-count change and `PASS` line
+actually proves. Worth reading if you want to verify the claims in this
+README rather than just take them on faith.
+
 This resets the environment, builds the star schema, seeds gold from the
 day-1 bronze snapshot, replays all five narrative events below (merging
 gold after **each one** -- not batched, see the comment in
