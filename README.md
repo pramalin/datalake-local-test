@@ -60,12 +60,53 @@ Wait ~30 seconds for health checks to pass. Verify:
 
 Run the contents of `lakehouse-sql/01_star_schema.sql` in your SQL client
 against Trino. This creates `dim_user`, `dim_role`, `dim_resource`,
-`fact_access_grant` (Type 1) and `fact_access_grant_history` (Type 2) as
-Iceberg tables.
+`fact_access_grant` (Type 1), `fact_access_grant_history` (Type 2), and
+the `current_active_access` view as Iceberg tables.
 
 **Run it as individual statements, not as a full script** — see
 `TROUBLESHOOTING.md` for why DBeaver's "Execute Script" mode has been
 unreliable with these files.
+
+### Schema at a glance
+
+<a href="https://raw.githubusercontent.com/pramalin/datalake-local-test/master/docs/images/schema_er.svg" target="_blank">
+  <img src="docs/images/schema_er.svg" alt="Schema: bronze log, star schema, and safe view" width="100%">
+</a>
+
+<p><em>Click the diagram to open the full-size SVG (Ctrl/Cmd + click for a new tab).</em></p>
+
+**bronze_dev_iam_public_iam_denormalized** — the append-only CDC log
+Debezium writes to (see section 5). Denormalized: it carries user/role/
+resource *names*, not just IDs, matching the client's actual source
+table shape. Never queried directly by consumers — it's the permanent
+raw record everything else is derived from.
+
+**fact_access_grant** (Type 1) — current-state mirror of the source,
+one row per `grant_id`. Includes revoked grants (`revoked_at` populated)
+and excludes hard-deleted ones (the row is gone entirely). **Not
+pre-filtered to active access** — see `current_active_access` below.
+
+**fact_access_grant_history** (Type 2) — the access-period model this
+whole project exists to prove out. A row spans `effective_start` to
+`effective_end` for as long as access was actually granted. A
+revocation or hard delete **closes** the row (`effective_end` set,
+`is_current = false`) and does **not** open a new "current" row — see
+section 5 and `TROUBLESHOOTING.md` issue #18 for why that distinction
+matters and what happens if you get it wrong.
+
+**current_active_access** (view) — `fact_access_grant` pre-filtered to
+`revoked_at IS NULL AND is_deleted = false`. Exists so a BI consumer
+querying "who has access" can't accidentally mistake "a row exists" for
+"access is currently active."
+
+**dim_user / dim_role / dim_resource** — declared but **intentionally
+not populated or joined via surrogate keys** in this demo. `user_id`,
+`role_id`, and `resource_id` are business keys, matched by convention
+only — Iceberg doesn't enforce a foreign-key constraint, and nothing
+currently loads these tables. A production version would populate them,
+add surrogate keys (`user_sk`/`role_sk`/`resource_sk`), and decide which
+dimension attributes need their own Type 2 history (e.g. a role's
+category changing over time) — see "Known limitations" below.
 
 ## 4. Replay a clean historical scenario and answer real business questions
 
@@ -158,7 +199,7 @@ overwriting the very history it was meant to preserve.
 | Bronze | `bronze_dev_iam_public_iam_denormalized` | **Append-only** (`upsert=false`) | Immutable log of every CDC event, including deletes. Never overwritten. |
 | Gold | `fact_access_grant` (Type 1), `fact_access_grant_history` (Type 2) | Derived via `lakehouse-sql/03_bronze_to_gold.sql` | Current-state and access-period history. In this demo, incrementally derived from bronze -- merged after each narrative event. A production version must process every bronze event in source order for history (see "Known limitations"). |
 
-Debezium now only ever **appends** to bronze. The gold tables are derived
+Debezium now only ever **appends** to bronze. The gold tables are 
 from that permanent log by a separate, idempotent merge script — the same
 question the reviewer asked ("where does history come from if the live
 pipeline overwrites changes?") now has a real answer: **from bronze, which
@@ -313,6 +354,15 @@ this local proof of concept:
   maps directly to one user/role/resource. Real IAM systems often involve
   group membership, role inheritance, and policy evaluation; whether that
   matters here depends on the client's actual access model.
+- **Dimensions declared but not populated or connected via surrogate
+  keys** — `dim_user`/`dim_role`/`dim_resource` exist as tables but
+  nothing loads them; the fact tables join to them (conceptually) via
+  business keys only, with no enforced foreign key and no surrogate key
+  (`user_sk` etc.) at all. Acceptable for a minimal schema-shape demo;
+  a production version needs both populated dimensions and a decision
+  on which dimension attributes need their own Type 2 history (e.g. a
+  role's category changing over time). See the schema diagram in
+  section 3.
 - **Bitemporal modeling** — retroactive corrections (a change entered
   today with an effective date in the past) aren't handled; the model
   assumes `source_changed_at` and business-effective time are the same.
