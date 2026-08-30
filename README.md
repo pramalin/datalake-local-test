@@ -39,6 +39,60 @@ history tables from it. Verified end to end: a live Postgres `UPDATE`
 appends to bronze without overwriting anything, and re-running the gold
 merge with no new events leaves both gold tables provably unchanged.
 
+## Source schema: what Debezium is actually watching
+
+Everything downstream starts from a single Postgres table,
+`iam_denormalized` (`postgres-init/01_schema.sql`) — deliberately shaped
+to match the client's **actual current OLTP representation**: flat,
+denormalized (names inline, not just IDs), and with no history of its
+own. This is the entire reason the project exists — the client can
+answer "who has access right now," but this table alone cannot answer
+"who had access as of a past date," because a normal `UPDATE` or
+`DELETE` here simply overwrites or removes the row, with nothing kept
+behind.
+
+| Column | Type | Constraint | Notes |
+|---|---|---|---|
+| `grant_id` | `BIGINT` | `PRIMARY KEY` | one row per access grant |
+| `user_id` | `BIGINT` | `NOT NULL` | business key, not a surrogate key |
+| `user_name` | `TEXT` | `NOT NULL` | denormalized, not joined from a users table |
+| `user_email` | `TEXT` | `NOT NULL` | denormalized |
+| `role_id` | `BIGINT` | `NOT NULL` | business key |
+| `role_name` | `TEXT` | `NOT NULL` | denormalized |
+| `role_category` | `TEXT` | nullable | e.g. Privileged / Standard / Read-Only |
+| `resource_id` | `BIGINT` | `NOT NULL` | business key |
+| `resource_name` | `TEXT` | `NOT NULL` | denormalized |
+| `resource_type` | `TEXT` | nullable | e.g. Database / Service / Storage |
+| `granted_at` | `TIMESTAMP` | `NOT NULL` | when access started |
+| `revoked_at` | `TIMESTAMP` | nullable | `NULL` = still active |
+| `updated_at` | `TIMESTAMP` | `NOT NULL`, default `now()` | last write to this row |
+| `is_deleted` | `BOOLEAN` | `NOT NULL`, default `false` | app-level soft-delete flag -- **separate from a hard `DELETE`**, which removes the row entirely and is what the demo's offboarding event actually does |
+
+**Two things about this table matter more than they might look:**
+
+1. **`REPLICA IDENTITY` is left at Postgres's default** (`DEFAULT`,
+   never explicitly changed) — deliberately, to demonstrate a real
+   constraint rather than configure it away. Under `DEFAULT`, a
+   `DELETE`'s replication payload carries only `grant_id` (the primary
+   key) — none of the other columns. This is *why* a hard delete has no
+   usable business timestamp and has to fall back to Debezium's capture
+   time (see section 5) — it's a direct, visible consequence of this
+   table's replication config, not an abstract caveat.
+2. **`is_deleted` existing as a column doesn't mean it's how deletions
+   happen in this demo.** The narrative's offboarding event
+   (`demo_events/04_offboard_contractor.sql`) issues a real `DELETE`,
+   not an `UPDATE ... SET is_deleted = true`. Both are realistic --
+   different source systems soft-delete or hard-delete -- but this
+   project specifically exercises the hard-delete path, since that's
+   the one a naive batch/`updated_at`-filtered extract would silently
+   miss entirely.
+
+Every column here reappears in the bronze log
+(`bronze_dev_iam_public_iam_denormalized`) unchanged, plus Debezium's
+own CDC metadata (`__op`, `__source_ts_ns`, `__table`, `__db`,
+`__deleted`) — see the schema diagram in section 3 for how it flows
+from there into gold.
+
 ## 1. Start the stack
 
 ```bash
